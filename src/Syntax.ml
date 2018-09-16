@@ -41,7 +41,30 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
     *)
-    let eval _ = failwith "Not implemented yet"
+    let itob x = if x == 0 then false else true
+    let btoi x = if x then 1 else 0
+
+    let doop op x y = match op with
+      | "+"  -> x + y
+      | "-"  -> x - y
+      | "*"  -> x * y
+      | "/"  -> x / y
+      | "%"  -> x mod y
+      | "<"  -> btoi (x < y)
+      | "<=" -> btoi (x <= y)
+      | ">"  -> btoi (x > y)
+      | ">=" -> btoi (x >= y)
+      | "==" -> btoi (x == y)
+      | "!=" -> btoi (x <> y)
+      | "&&" -> btoi ((itob x) && (itob y))
+      | "!!" -> btoi ((itob x) || (itob y))
+      |  _   -> failwith (Printf.sprintf "Undefined operator %s" op)
+
+
+    let rec eval st e = match e with
+      | Const x -> x
+      | Var x -> st x
+      | Binop (op, x, y) -> doop op (eval st x) (eval st y)
 
   end
                     
@@ -65,8 +88,15 @@ module Stmt =
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let eval _ = failwith "Not implemented yet"
-                                                         
+
+    let eval (st, z :: i, o) stmt = match stmt with
+      | Read s -> ((Expr.update s z st), i, o)
+
+    let rec eval (st, i, o) stmt = match stmt with
+      | Write exp -> (st, i, o @ [Expr.eval st exp])
+      | Assign (s, exp) -> ((Expr.update s (Expr.eval st exp) st), i, o)
+      | Seq (t1, t2) -> eval (eval (st, i, o) t1) t2
+
   end
 
 (* The top-level definitions *)
