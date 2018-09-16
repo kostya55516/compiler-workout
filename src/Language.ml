@@ -5,6 +5,7 @@ open GT
 
 (* Opening a library for combinator-based syntax analysis *)
 open Ostap.Combinators
+open Ostap
        
 (* Simple expressions: syntax and semantics *)
 module Expr =
@@ -44,7 +45,31 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
     *)
-    let eval _ = failwith "Not implemented yet"
+    let itob x = if x == 0 then false else true
+    let btoi x = if x then 1 else 0
+
+    let doop op x y = match op with
+      | "+"  -> x + y
+      | "-"  -> x - y
+      | "*"  -> x * y
+      | "/"  -> x / y
+      | "%"  -> x mod y
+      | "<"  -> btoi (x < y)
+      | "<=" -> btoi (x <= y)
+      | ">"  -> btoi (x > y)
+      | ">=" -> btoi (x >= y)
+      | "==" -> btoi (x == y)
+      | "!=" -> btoi (x <> y)
+      | "&&" -> btoi ((itob x) && (itob y))
+      | "!!" -> btoi ((itob x) || (itob y))
+      |  _   -> failwith (Printf.sprintf "Undefined operator %s" op)
+
+
+    let rec eval st e = match e with
+      | Const x -> x
+      | Var x -> st x
+      | Binop (op, x, y) -> doop op (eval st x) (eval st y)
+
 
     (* Expression parser. You can use the following terminals:
 
@@ -52,8 +77,34 @@ module Expr =
          DECIMAL --- a decimal constant [0-9]+ as a string
    
     *)
+
+    let binop op x y = Binop (op, x, y)
+
     ostap (
-      parse: empty {failwith "Not implemented yet"}
+      expr:
+        !(Util.expr
+           (fun x -> x)
+           [|
+             `Lefta , [ostap ("!!"), (binop "!!")];
+             `Lefta , [ostap ("&&"), (binop "&&")];
+             `Nona  , [ostap ("<="), (binop "<=");
+                       ostap (">="), (binop ">=");
+                       ostap ("<"), (binop "<");
+                       ostap (">"), (binop ">")];
+             `Nona  , [ostap ("=="), (binop "==");
+                       ostap ("!="), (binop "!=")];
+             `Lefta , [ostap ("+"), (binop "+");
+                       ostap ("-"), (binop "-")];
+             `Lefta , [ostap ("*"), (binop "*");
+                       ostap ("/"), (binop "/");
+                       ostap ("%"), (binop "%")]
+           |]
+           primary
+         );
+
+      primary: x:IDENT {Var x} | n:DECIMAL {Const n}  | -"(" expr -")";
+
+      parse: expr
     )
 
   end
@@ -78,11 +129,25 @@ module Stmt =
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let eval _ = failwith "Not implemented yet"
+
+    let rec eval (st, i, o) stmt = match stmt with
+      | Write exp -> (st, i, o @ [Expr.eval st exp])
+      | Assign (s, exp) -> ((Expr.update s (Expr.eval st exp) st), i, o)
+      | Seq (t1, t2) -> eval (eval (st, i, o) t1) t2
+      | Read s -> match i with
+        | x::xs -> ((Expr.update s x st), xs, o)
+        | _ -> failwith "Nothig to read"
 
     (* Statement parser *)
     ostap (
-      parse: empty {failwith "Not implemented yet"}
+      expr: !(Expr.expr);
+
+      stmt:
+        x:IDENT ":=" e:expr     {Assign (x, e)}
+      | "read" "(" x:IDENT ")"  {Read x}
+      | "write" "(" e:expr ")"  {Write e};
+
+      parse: <x::xs> :!(Util.listBy)[ostap (";")][stmt] {List.fold_left (fun x y -> Seq (x, y)) x xs}
     )
       
   end
