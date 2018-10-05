@@ -24,7 +24,25 @@ type config = int list * Stmt.config
 
    Takes a configuration and a program, and returns a configuration as a result
 *)                         
-let rec eval conf prog = failwith "Not yet implemented"
+let rec eval (cf : config) (pl : prg) : config = match pl with
+  | [] -> cf
+  | p :: ps -> match p with
+    | BINOP op -> (match cf with
+      | (y :: x :: stack, c) ->  eval ((Language.Expr.doop op x y) :: stack, c) ps
+      | _ -> failwith "SM eval BINOP")
+    | CONST z -> (match cf with
+      | (stack, c) -> eval (z :: stack, c) ps)
+    | WRITE -> (match cf with
+      | (z :: stack, (st, i, o)) -> eval (stack, (st, i, o @ [z])) ps
+      | _ -> failwith "SM eval WRITE")
+    | READ -> (match cf with
+      | (stack, (st, z :: i, o)) -> eval (z :: stack, (st, i, o)) ps
+      | _ -> failwith "SM eval READ")
+    | ST x -> (match cf with
+      | (z :: stack, (st, i, o)) -> eval (stack, ((Language.Expr.update x z st), i, o)) ps
+      | _ -> failwith "SM eval ST")
+    | LD x -> (match cf with
+      | (stack, (st, i, o)) -> eval ((st x) :: stack, (st, i, o)) ps)
 
 (* Top-level evaluation
 
