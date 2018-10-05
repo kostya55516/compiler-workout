@@ -86,7 +86,92 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code = failwith "Not yet implemented"
+let suffix op = match op with
+    | "<" -> "l"
+    | "<=" -> "le"
+    | ">" -> "g"
+    | ">=" -> "ge"
+    | "==" -> "e"
+    | "!=" -> "ne"
+
+
+let rec compile env code =
+  let onstack = function | S _ -> true | _ -> false in
+  match code with
+  | [] -> env, []
+  | inst :: code' ->
+    let env, xcode =
+      match inst with
+        | LD x    -> let s, env = (env#global x)#allocate in
+                      env, (match s with
+                            | M _ | S _ -> [Mov (M (env#loc x), eax); Mov (eax, s)]
+                            | _        -> [Mov (M (env#loc x), s)]
+                           )
+        | ST x    -> let s, env = (env#global x)#pop in
+                      env, [Mov (s, M (env#loc x))]
+        | READ    -> let s, env = env#allocate in
+                      env, [Call "Lread"; Mov (eax, s)]
+        | WRITE   -> let s, env = env#pop in
+                      env, [Push s; Call "Lwrite"; Pop eax]
+        | CONST z -> let s, env = env#allocate in
+                      env, [Mov (L z, s)]
+
+        | LABEL l     -> env, [Label l]
+        | JMP l       -> env, [Jmp l]
+        | CJMP (t, l) -> let s, env = env#pop in
+                          env, [Binop ("cmp", L 0, s); CJmp (t, l)]
+
+        | BINOP op  ->
+        let x, y, env = env#pop2 in
+          env#push y, 
+          (match op with
+          | "*"  -> 
+                  if onstack x && onstack y
+                  then [Mov (y, eax); Binop(op, x, eax); Mov(eax, y)]
+                  else [Binop (op, x, y)] 
+          | "+" | "-" -> 
+                  if onstack x && onstack y
+                  then [Mov (x, eax); Binop(op, eax, y)]
+                  else [Binop (op, x, y)] 
+          | "%" | "/" -> 
+                  [Mov (y, eax);
+                  Cltd;
+                  IDiv x;
+                  Mov ((match op with
+                    | "/" -> eax
+                    | _ -> edx), y)
+                  ]
+          | "<=" | "<" | ">=" | ">" | "==" | "!=" ->
+            [
+              Binop ("^", eax, eax);
+              Mov   (x, edx);
+              Binop ("cmp", edx, y);
+              Set   (suffix op, "%al");
+              Mov   (eax, y)
+            ]
+          | "!!" -> 
+            [
+              Mov   (y, eax);
+              Binop (op, x, eax);
+              Mov   (L 0, eax);
+              Set   ("ne", "%al");
+              Mov   (eax, y)
+            ]
+          | "&&" -> 
+            [
+              Mov   (L 0, eax);
+              Binop ("cmp", eax, x);
+              Set   ("ne", "%al");
+              Mov   (L 0, edx);
+              Binop ("cmp", edx, y);
+              Set   ("ne", "%dl");
+              Binop (op, eax, edx);
+              Mov   (edx, y)
+            ]
+          )
+    in
+    let env, xcode' = compile env code' in
+      env, xcode @ xcode'
 
 (* A set of strings *)           
 module S = Set.Make (String)
@@ -108,7 +193,7 @@ class env =
 	| []                            -> ebx     , 0
 	| (S n)::_                      -> S (n+1) , n+1
 	| (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
-        | (M _)::s                      -> allocate' s
+  | (M _)::s                      -> allocate' s
 	| _                             -> S 0     , 1
 	in
 	allocate' stack
