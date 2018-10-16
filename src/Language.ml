@@ -5,6 +5,7 @@ open GT
 
 (* Opening a library for combinator-based syntax analysis *)
 open Ostap.Combinators
+open Ostap
 
 (* States *)
 module State =
@@ -95,27 +96,33 @@ module Expr =
          DECIMAL --- a decimal constant [0-9]+ as a string
                                                                                                                   
     *)
-    ostap (                                      
-      parse:
-	  !(Ostap.Util.expr 
-             (fun x -> x)
-	     (Array.map (fun (a, s) -> a, 
-                           List.map  (fun s -> ostap(- $(s)), (fun x y -> Binop (s, x, y))) s
-                        ) 
-              [|                
-		`Lefta, ["!!"];
-		`Lefta, ["&&"];
-		`Nona , ["=="; "!="; "<="; "<"; ">="; ">"];
-		`Lefta, ["+" ; "-"];
-		`Lefta, ["*" ; "/"; "%"];
-              |] 
-	     )
-	     primary);
-      
-      primary:
-        n:DECIMAL {Const n}
-      | x:IDENT   {Var x}
-      | -"(" parse -")"
+    let binop op x y = Binop (op, x, y)
+
+    ostap (
+      expr:
+        !(Util.expr
+           (fun x -> x)
+           [|
+             `Lefta , [ostap ("!!"), (binop "!!")];
+             `Lefta , [ostap ("&&"), (binop "&&")];
+             `Nona  , [ostap ("<="), (binop "<=");
+                       ostap (">="), (binop ">=");
+                       ostap ("<"), (binop "<");
+                       ostap (">"), (binop ">")];
+             `Nona  , [ostap ("=="), (binop "==");
+                       ostap ("!="), (binop "!=")];
+             `Lefta , [ostap ("+"), (binop "+");
+                       ostap ("-"), (binop "-")];
+             `Lefta , [ostap ("*"), (binop "*");
+                       ostap ("/"), (binop "/");
+                       ostap ("%"), (binop "%")]
+           |]
+           primary
+         );
+
+      primary: x:IDENT {Var x} | n:DECIMAL {Const n}  | -"(" expr -")";
+
+      parse: expr
     )
     
   end
@@ -133,7 +140,6 @@ module Stmt =
     (* empty statement                  *) | Skip
     (* conditional                      *) | If     of Expr.t * t * t
     (* loop with a pre-condition        *) | While  of Expr.t * t
-    (* loop with a post-condition       *) | Repeat of t * Expr.t
     (* call a procedure                 *) | Call   of string * Expr.t list with show
                                                                     
     (* The type of configuration: a state, an input stream, an output stream *)
@@ -150,13 +156,68 @@ module Stmt =
 
        which returns a list of formal parameters and a body for given definition
     *)
-    let rec eval _ = failwith "Not Implemented Yet"
-                                
+    let fill_and_push_scope st params locals args =
+          let st                    = State.push_scope st (params @ locals) in
+          let update st (p, a)      = State.update p a st in
+          List.fold_left update st (List.combine params args)
+
+    let rec eval env conf stmt =
+      let st, i, o = conf in
+       match stmt with
+        | Write exp -> (st, i, o @ [Expr.eval st exp])
+        | Assign (s, exp) -> ((State.update s (Expr.eval st exp) st), i, o)
+        | Seq (t1, t2) -> eval env (eval env conf t1) t2
+        | Read s -> (
+          match i with
+          | x::xs -> ((State.update s x st), xs, o)
+          | _ -> failwith "Nothig to read"
+        )
+        | Skip -> conf
+        | If (exp, s1, s2) -> let s = if (Expr.eval st exp != 0) then s1 else s2 in eval env conf s
+        | While (exp, s) -> if (Expr.eval st exp != 0) then eval env (eval env conf s) (While (exp, s)) else conf
+        | Call (name, exps) -> 
+          let params, locals, stmt' = env#definition name in
+          let args                  = List.map (Expr.eval st) exps in
+          let st'                   = fill_and_push_scope st params locals args in
+          let st'', i', o'          = eval env (st', i, o) stmt' in
+          (State.drop_scope st'' st, i', o')
+
+
     (* Statement parser *)
-    ostap (                                      
-      parse: empty {failwith "Not yet implemented"}
+     let negate e = Expr.Binop("==", e, Expr.Const 0)
+    (* Statement parser *)
+    ostap (
+      expr: !(Expr.expr);
+
+      stmt:
+        x:IDENT ":=" e:expr     { Assign (x, e) }
+      | "read" "(" x:IDENT ")"  { Read x }
+      | "write" "(" e:expr ")"  { Write e }
+      | "skip"                  { Skip }
+      | "if" e:expr "then" s1:parse "elif" s2:elif "fi"           { If (e, s1, s2) }
+      | "if" e:expr "then" s1:parse "else" s2:parse "fi"          { If (e, s1, s2) }
+      | "if" e:expr "then" s1:parse "fi"                          { If (e, s1, Skip) }
+      | "while" e:expr "do" s:parse "od"                          { While (e, s) }
+      | "for"   s1:stmt "," e:expr "," s2:stmt "do" s:parse "od"  { Seq (s1, While(e, Seq(s, s2))) }
+      | "repeat" s:parse "until" e:expr                           { Seq (s, While(negate e, s)) }
+      | fname:IDENT "(" a:args ")"                                { Call (fname, a) }
+      ;
+
+      args:
+        e:expr "," a:args   { e :: a }
+      | e:expr              { [e] }
+      | empty               { [] }
+      ;
+ 
+      elif:
+        e:expr "then" s1:parse "elif" s2:elif             { If (e, s1, s2) }
+      | e:expr "then" s1:parse "else" s2:parse            { If (e, s1, s2) }
+      | e:expr "then" s1:parse                            { If (e, s1, Skip) }
+      ;
+
+      parse: <x::xs> :!(Util.listBy)[ostap (";")][stmt] { List.fold_left (fun x y -> Seq (x, y)) x xs }
     )
-      
+
   end
 
 (* Function and procedure definitions *)
@@ -167,7 +228,21 @@ module Definition =
     type t = string * (string list * string list * Stmt.t)
 
     ostap (                                      
-      parse: empty {failwith "Not yet implemented"}
+      
+      stmt: !(Stmt.parse);
+
+      params: 
+          x:IDENT "," p:params  { x :: p }
+        | x:IDENT               { [x] }
+        | empty                 { [] }
+        ;
+
+      locals: 
+          "local" p:params  { p }
+        | empty             { [] }
+        ;
+
+      parse: "fun" f:IDENT "(" p:params ")" l:locals "{" s:stmt "}" { f, (p, l, s) }
     )
 
   end
