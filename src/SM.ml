@@ -61,7 +61,7 @@ let rec eval env ((cs, stack, ((st, i, o, r) as c)) as cf) pl =
       | x::xs -> let fs, ts = cut (k - 1) xs in x :: fs, ts  
     in
     let args, stack  = cut (List.length xs) stack in
-    let st           = List.fold_right (fun (x, a) st -> State.update x a st) (List.combine xs args) (State.enter st (xs @ locs)) in
+    let st           = List.fold_left (fun st (x, a) -> State.update x a st) (State.enter st (xs @ locs)) (List.combine xs (List.rev args)) in
     eval_d (cs, stack, (st, i, o, r))
 
   | END             ->  (match cs with
@@ -141,7 +141,7 @@ let compile (d, p) =
   | Expr.Var   x          -> [LD x]
   | Expr.Const n          -> [CONST n]
   | Expr.Binop (op, x, y) -> expr x @ expr y @ [BINOP op]
-  | Expr.Call (f, exps)   -> List.fold_left (fun ins e -> (expr e) @ ins) [CALL (fun_label f, List.length exps, true)] exps
+  | Expr.Call (f, exps)   -> List.fold_right (fun e ins -> (expr e) @ ins) exps [CALL (fun_label f, List.length exps, true)]
   in
   let rec state_comp =
   let open IState in function

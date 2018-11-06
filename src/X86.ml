@@ -178,44 +178,6 @@ let rec compile env code =
             | 0 -> [], e  
             | _ ->  let x, e  = f e in
                     let xs, e = gen (n - 1) f e in
-                    x::xs, e
-          in
-          let args, env = gen n (fun env -> env#pop) env in
-          let live      = env#live_registers in
-          let start     = 
-            match fst (env#allocate) with
-            | S k -> k
-            | _   -> 0
-          in 
-          let end_p     = start + List.length live + n - 1 in
-          let args_push = 
-            let args_push = List.mapi 
-              (fun i -> let s_to = M (Printf.sprintf "-%d(%%esp)" ((end_p - i + 1) * word_size)) in function 
-                          | R a -> [Mov (R a, s_to)]
-                          | a   -> [Mov (a, eax); Mov (eax, s_to)]
-                )
-              args
-            in List.flatten args_push
-          in 
-          let save_live   = List.fold_right (fun a xs -> (Push a)::xs) live [] in
-          let load_live   = List.fold_left (fun xs a -> (Pop a)::xs) [] live in
-          let ret, env    = if b then let s, env = env#allocate in [Mov (eax, s)], env else [], env in
-          env, [Meta ("#CALL " ^ f)] 
-              @ args_push
-              @ [Binop ("-", L (start * word_size), esp)] 
-              @ save_live 
-              @ [Binop ("-", L (n * word_size), esp);
-                 Call f;
-                 Binop ("+", L (n * word_size), esp)] 
-              @ load_live 
-              @ ret
-
-
-          (* let rec gen n f e =
-            match n with
-            | 0 -> [], e  
-            | _ ->  let x, e  = f e in
-                    let xs, e = gen (n - 1) f e in
                     (Push x)::xs, e
           in
           let push_a, env = gen n (fun env -> env#pop) env in
@@ -224,9 +186,9 @@ let rec compile env code =
           let load_live   = List.fold_left (fun xs a -> (Pop a)::xs) [] live in
           let ret, env    = if b then let s, env = env#allocate in [Mov (eax, s)], env else [], env in
           env, save_live @ push_a @ [Call f; Binop ("+", L (n * word_size), esp)] @ ret @ load_live
- *)
+
         | BEGIN (f, a, l) ->  let env = env#enter f a l in
-          env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ env#lsize), esp)]
+          env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ (env#lsize)), esp);]
 
           (* создать метку; создать переменные; заполнить переменные из стека; пролог*)
         | END             ->  env, [Label (env#epilogue); Mov (ebp, esp); Pop ebp; Ret;
@@ -274,10 +236,10 @@ class env =
       let x, n =
     	let rec allocate' = function
     	| []                            -> R 0     , 0
-    	| (S n)::_                      -> S (n+1) , n+1
+    	| (S n)::_                      -> S (n+1) , n+2
     	| (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
       | (M _)::s                      -> allocate' s
-    	| _                             -> S 0     , 1
+    	| _                             -> let n = List.length locals in S n, n + 1
     	in
     	allocate' stack
       in
