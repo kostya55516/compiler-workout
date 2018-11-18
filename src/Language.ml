@@ -79,7 +79,7 @@ module Builtin =
                     (st, i, o, let i = Value.to_int j in
                                Some (match b with
                                      | Value.String s -> Value.of_int @@ Char.code s.[i]
-                                     | Value.Array  a -> if (i >= List.length a) then failwith (Printf.sprintf "%d >= %d" i (List.length a)) else List.nth a i
+                                     | Value.Array  a -> List.nth a i
                                )
                     )         
     | ".length"  -> (st, i, o, Some (Value.of_int (match List.hd args with Value.Array a -> List.length a | Value.String s -> String.length s)))
@@ -286,7 +286,7 @@ module Stmt =
           let i = Value.to_int i in
           (match a with
            | Value.String s when tl = [] -> Value.String (Value.update_string s i (Char.chr @@ Value.to_int v))
-           | Value.Array a               -> Value.Array  (Value.update_array  a i (update (List.nth a i) v tl))
+           | Value.Array a               -> if i >= List.length a then failwith (Printf.sprintf "%d >= %d" i (List.length a)) else Value.Array  (Value.update_array  a i (update (List.nth a i) v tl))
           ) 
       in
       State.update x (match is with [] -> v | _ -> update (State.eval st x) v is) st
@@ -331,7 +331,6 @@ module Stmt =
       stmt:
         x:IDENT ":=" e:expr         { Assign (x, [], e) }
       | x:IDENT is:inds ":=" e:expr { Assign (x, is, e) } 
-      (* | "write" "(" e:expr ")"      { Call ("write", [e]) } *)
       | "skip"                      { Skip }
       | "if" e:expr "then" s1:parse "elif" s2:elif "fi"           { If (e, s1, s2) }
       | "if" e:expr "then" s1:parse "else" s2:parse "fi"          { If (e, s1, s2) }
