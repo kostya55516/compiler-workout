@@ -106,8 +106,13 @@ let compile env code =
 (* A set of strings *)           
 module S = Set.Make (String)
 
+
+let list_init n f =
+  let rec list_init n f i = if i < n then (f i)::(list_init n f (i + 1)) else [] in
+  list_init n f 0
+
 (* Environment implementation *)
-let make_assoc l = List.combine l (List.init (List.length l) (fun x -> x))
+let make_assoc l = List.combine l (list_init (List.length l) (fun x -> x))
                      
 class env =
   object (self)
