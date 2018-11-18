@@ -90,18 +90,117 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code =
-  let suffix = function
-  | "<"  -> "l"
-  | "<=" -> "le"
-  | "==" -> "e"
-  | "!=" -> "ne"
-  | ">=" -> "ge"
-  | ">"  -> "g"
-  | _    -> failwith "unknown operator"	
-  in
-  let rec compile' env scode = failwith "Not implemented" in
-  compile' env code
+let suffix op = match op with
+    | "<" -> "l"
+    | "<=" -> "le"
+    | ">" -> "g"
+    | ">=" -> "ge"
+    | "==" -> "e"
+    | "!=" -> "ne"
+
+let rec compile env code =
+  let onstack = function | S _ -> true | _ -> false in
+  match code with
+  | [] -> env, []
+  | inst :: code' ->
+    let env, xcode =
+      match inst with
+        | LD x    -> let s, env = (env#global x)#allocate in
+                      env, (match s with
+                            | M _ | S _ -> [Mov (env#loc x, eax); Mov (eax, s)]
+                            | _        -> [Mov (env#loc x, s)]
+                           )
+        | ST x    -> let s, env = (env#global x)#pop in
+                      env, [Mov (s, env#loc x)]
+        | CONST z -> let s, env = env#allocate in
+                      env, [Mov (L z, s)]
+
+        | LABEL l     -> env, [Label l]
+        | JMP l       -> env, [Jmp l]
+        | CJMP (t, l) -> let s, env = env#pop in
+                          env, [Binop ("cmp", L 0, s); CJmp (t, l)]
+
+        | BINOP op  ->
+        let x, y, env = env#pop2 in
+          env#push y, 
+          (match op with
+          | "*"  -> 
+                  if onstack x && onstack y
+                  then [Mov (y, eax); Binop(op, x, eax); Mov(eax, y)]
+                  else [Binop (op, x, y)] 
+          | "+" | "-" -> 
+                  if onstack x && onstack y
+                  then [Mov (x, eax); Binop(op, eax, y)]
+                  else [Binop (op, x, y)] 
+          | "%" | "/" -> 
+                  [Mov (y, eax);
+                  Cltd;
+                  IDiv x;
+                  Mov ((match op with
+                    | "/" -> eax
+                    | _ -> edx), y)
+                  ]
+          | "<=" | "<" | ">=" | ">" | "==" | "!=" ->
+            [
+              Binop ("^", eax, eax);
+              Mov   (x, edx);
+              Binop ("cmp", edx, y);
+              Set   (suffix op, "%al");
+              Mov   (eax, y)
+            ]
+          | "!!" -> 
+            [
+              Mov   (y, eax);
+              Binop (op, x, eax);
+              Mov   (L 0, eax);
+              Set   ("ne", "%al");
+              Mov   (eax, y)
+            ]
+          | "&&" -> 
+            [
+              Mov   (L 0, eax);
+              Binop ("cmp", eax, x);
+              Set   ("ne", "%al");
+              Mov   (L 0, edx);
+              Binop ("cmp", edx, y);
+              Set   ("ne", "%dl");
+              Binop (op, eax, edx);
+              Mov   (edx, y)
+            ]
+          )
+        | CALL (f, n, b)  ->  
+          let rec gen n f e =
+            match n with
+            | 0 -> [], e  
+            | _ ->  let x, e  = f e in
+                    let xs, e = gen (n - 1) f e in
+                    (Push x)::xs, e
+          in
+          let push_a, env = gen n (fun env -> env#pop) env in
+          let live        = env#live_registers in
+          let save_live   = List.fold_right (fun a xs -> (Push a)::xs) live [] in
+          let load_live   = List.fold_left (fun xs a -> (Pop a)::xs) [] live in
+          let ret, env    = if b then let s, env = env#allocate in [Mov (eax, s)], env else [], env in
+          env, save_live @ push_a @ [Call f; Binop ("+", L (n * word_size), esp)] @ ret @ load_live
+
+        | BEGIN (f, a, l) ->  let env = env#enter f a l in
+          env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ (env#lsize)), esp);]
+
+          (* создать метку; создать переменные; заполнить переменные из стека; пролог*)
+        | END             ->  env, [Label (env#epilogue); Mov (ebp, esp); Pop ebp; Ret;
+                                    Meta (Printf.sprintf "\t.set\t%s,\t%d" env#lsize (env#allocated * word_size))]
+
+        (* метка эпилога; сдлеать эпилог*)
+        | RET b           ->  
+          let env, ret =
+            match b with
+            | false -> env, []
+            | true  -> let s, env = env#pop in env, [Mov (s, eax)] 
+          in
+          env, ret @ [Jmp (env#epilogue)] (* положить или нет значение на стек; перейти на эпилог *)
+    in
+    let env, xcode' = compile env code' in
+      env, xcode @ xcode'
 
 (* A set of strings *)           
 module S = Set.Make (String)
