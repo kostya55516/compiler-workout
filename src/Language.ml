@@ -331,7 +331,7 @@ module Stmt =
         let rec p_match v = function
         | Sexp (g, ps) ->
           let Value.Sexp (t, vs) = v in 
-          String.compare t g == 0 && List.compare_lengths vs ps == 0 && List.for_all2 (fun v p -> p_match v p) vs ps
+          String.compare t g == 0 && List.length vs == List.length vs && List.for_all2 (fun v p -> p_match v p) vs ps
         | _ -> true
 
         let bindings a p =
