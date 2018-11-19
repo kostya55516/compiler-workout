@@ -1,3 +1,5 @@
+SHELL := /bin/bash
+
 TESTS=$(basename $(wildcard test*.expr))
 
 RC=../src/rc.opt

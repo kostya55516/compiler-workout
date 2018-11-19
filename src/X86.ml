@@ -90,172 +90,123 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code =
-  let suffix = function
-  | "<"  -> "l"
-  | "<=" -> "le"
-  | "==" -> "e"
-  | "!=" -> "ne"
-  | ">=" -> "ge"
-  | ">"  -> "g"
-  | _    -> failwith "unknown operator"	
-  in
-  let rec compile' env scode =    
-    let on_stack = function S _ -> true | _ -> false in
-    let call env f n p =
-      let f =
-        match f.[0] with '.' -> "B" ^ String.sub f 1 (String.length f - 1) | _ -> f
-      in
-      let pushr, popr =
-        List.split @@ List.map (fun r -> (Push r, Pop r)) (env#live_registers n)
-      in
-      let env, code =
-        if n = 0
-        then env, pushr @ [Call f] @ (List.rev popr)
-        else
-          let rec push_args env acc = function
-          | 0 -> env, acc
-          | n -> let x, env = env#pop in
-                 push_args env ((Push x)::acc) (n-1)
-          in
-          let env, pushs = push_args env [] n in
-          let pushs      =
-            match f with
-            | "Barray" -> List.rev @@ (Push (L n))     :: pushs
-            | "Bsta"   ->
-               let x::v::is = List.rev pushs in               
-               is @ [x; v] @ [Push (L (n-2))]
-            | _  -> List.rev pushs 
-          in
-          env, pushr @ pushs @ [Call f; Binop ("+", L (n*4), esp)] @ (List.rev popr)
-      in
-      (if p then env, code else let y, env = env#allocate in env, code @ [Mov (eax, y)])
-    in
-    match scode with
-    | [] -> env, []
-    | instr :: scode' ->
-        let env', code' =
-          match instr with
-  	  | CONST n ->
-             let s, env' = env#allocate in
-	     (env', [Mov (L n, s)])
-               
-          | STRING s ->
-             let s, env = env#string s in
-             let l, env = env#allocate in
-             let env, call = call env ".string" 1 false in
-             (env, Mov (M ("$" ^ s), l) :: call)
-             
-	  | LD x ->
-             let s, env' = (env#global x)#allocate in
-             env',
-	     (match s with
-	      | S _ | M _ -> [Mov (env'#loc x, eax); Mov (eax, s)]
-	      | _         -> [Mov (env'#loc x, s)]
-	     )               
-          | STA (x, n) ->
-             let s, env = (env#global x)#allocate in
-             let push =
-               match s with
-               | S _ | M _ -> [Mov (env#loc x, eax); Mov (eax, s)]
-	       | _         -> [Mov (env#loc x, s)]
-             in
-             let env, code = call env ".sta" (n+2) true in
-             env, push @ code
-	  | ST x ->
-	     let s, env' = (env#global x)#pop in
-             env',
-             (match s with
-              | S _ | M _ -> [Mov (s, eax); Mov (eax, env'#loc x)]
-              | _         -> [Mov (s, env'#loc x)]
-	     )
-          | BINOP op ->
-	     let x, y, env' = env#pop2 in
-             env'#push y,
-             (match op with
-	      | "/" | "%" ->
-                 [Mov (y, eax);
-                  Cltd;
-                  IDiv x;
-                  Mov ((match op with "/" -> eax | _ -> edx), y)
-                 ]
-              | "<" | "<=" | "==" | "!=" | ">=" | ">" ->
-                 (match x with
-                  | M _ | S _ ->
-                     [Binop ("^", eax, eax);
-                      Mov   (x, edx);
-                      Binop ("cmp", edx, y);
-                      Set   (suffix op, "%al");
-                      Mov   (eax, y)
-                     ]
-                  | _ ->
-                     [Binop ("^"  , eax, eax);
-                      Binop ("cmp", x, y);
-                      Set   (suffix op, "%al");
-                      Mov   (eax, y)
-                     ]
-                 )
-              | "*" ->
-                 if on_stack x && on_stack y 
-		 then [Mov (y, eax); Binop (op, x, eax); Mov (eax, y)]
-                 else [Binop (op, x, y)]
-	      | "&&" ->
-		 [Mov   (x, eax);
-		  Binop (op, x, eax);
-		  Mov   (L 0, eax);
-		  Set   ("ne", "%al");
-                  
-		  Mov   (y, edx);
-		  Binop (op, y, edx);
-		  Mov   (L 0, edx);
-		  Set   ("ne", "%dl");
-                  
-                  Binop (op, edx, eax);
-		  Set   ("ne", "%al");
-                  
-		  Mov   (eax, y)
-                 ]		   
-	      | "!!" ->
-		 [Mov   (y, eax);
-		  Binop (op, x, eax);
-                  Mov   (L 0, eax);
-		  Set   ("ne", "%al");
-		  Mov   (eax, y)
-                 ]		   
-	      | _   ->
-                 if on_stack x && on_stack y 
-                 then [Mov   (x, eax); Binop (op, eax, y)]
-                 else [Binop (op, x, y)]
-             )
-          | LABEL s     -> env, [Label s]
-	  | JMP   l     -> env, [Jmp l]
-          | CJMP (s, l) ->
-              let x, env = env#pop in
-              env, [Binop ("cmp", L 0, x); CJmp  (s, l)]
-                     
-          | BEGIN (f, a, l) ->
-             let env = env#enter f a l in
-             env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ env#lsize), esp)]
-                            
-          | END ->             
-             env, [Label env#epilogue;
-                   Mov (ebp, esp);
-                   Pop ebp;
-                   Ret;
-                   Meta (Printf.sprintf "\t.set\t%s,\t%d" env#lsize (env#allocated * word_size))
-                  ]
-                    
-          | RET b ->
-             if b
-             then let x, env = env#pop in env, [Mov (x, eax); Jmp env#epilogue]
-             else env, [Jmp env#epilogue]
-             
-          | CALL (f, n, p) -> call env f n p
+
+let list_init n f =
+  let rec list_init n f i = if i < n then (f i)::(list_init n f (i + 1)) else [] in
+  list_init n f 0
+
+
+let suffix op = match op with
+    | "<" -> "l"
+    | "<=" -> "le"
+    | ">" -> "g"
+    | ">=" -> "ge"
+    | "==" -> "e"
+    | "!=" -> "ne"
+
+let rec compile env code =
+  let onstack = function | S _ -> true | _ -> false in
+  match code with
+  | [] -> env, []
+  | inst :: code' ->
+    let env, xcode =
+      match inst with
+      | LD x    -> let s, env = (env#global x)#allocate in
+                    env, (match s with
+                          | M _ | S _ -> [Mov (env#loc x, eax); Mov (eax, s)]
+                          | _        -> [Mov (env#loc x, s)]
+                         )
+      | ST x    -> let s, env = (env#global x)#pop in
+                    env, [Mov (s, env#loc x)]
+      | CONST z -> let s, env = env#allocate in
+                    env, [Mov (L z, s)]
+
+      | LABEL l     -> env, [Label l]
+      | JMP l       -> env, [Jmp l]
+      | CJMP (t, l) -> let s, env = env#pop in
+                        env, [Binop ("cmp", L 0, s); CJmp (t, l)]
+
+      | BINOP op  ->
+      let x, y, env = env#pop2 in
+        env#push y, 
+        (match op with
+        | "*"  -> 
+                if onstack x && onstack y
+                then [Mov (y, eax); Binop(op, x, eax); Mov(eax, y)]
+                else [Binop (op, x, y)] 
+        | "+" | "-" -> 
+                if onstack x && onstack y
+                then [Mov (x, eax); Binop(op, eax, y)]
+                else [Binop (op, x, y)] 
+        | "%" | "/" -> 
+                [Mov (y, eax);
+                Cltd;
+                IDiv x;
+                Mov ((match op with
+                  | "/" -> eax
+                  | _ -> edx), y)
+                ]
+        | "<=" | "<" | ">=" | ">" | "==" | "!=" ->
+          [
+            Binop ("^", eax, eax);
+            Mov   (x, edx);
+            Binop ("cmp", edx, y);
+            Set   (suffix op, "%al");
+            Mov   (eax, y)
+          ]
+        | "!!" -> 
+          [
+            Mov   (y, eax);
+            Binop (op, x, eax);
+            Mov   (L 0, eax);
+            Set   ("ne", "%al");
+            Mov   (eax, y)
+          ]
+        | "&&" -> 
+          [
+            Mov   (L 0, eax);
+            Binop ("cmp", eax, x);
+            Set   ("ne", "%al");
+            Mov   (L 0, edx);
+            Binop ("cmp", edx, y);
+            Set   ("ne", "%dl");
+            Binop (op, eax, edx);
+            Mov   (edx, y)
+          ]
+        )
+      | CALL (f, n, b)  ->  
+        let rec gen n f e =
+          match n with
+          | 0 -> [], e  
+          | _ ->  let x, e  = f e in
+                  let xs, e = gen (n - 1) f e in
+                  (Push x)::xs, e
         in
-        let env'', code'' = compile' env' scode' in
-	env'', code' @ code''
-  in
-  compile' env code
+        let push_a, env = gen n (fun env -> env#pop) env in
+        let live        = env#live_registers 1 in
+        let save_live   = List.fold_right (fun a xs -> (Push a)::xs) live [] in
+        let load_live   = List.fold_left (fun xs a -> (Pop a)::xs) [] live in
+        let ret, env    = if b then let s, env = env#allocate in [Mov (eax, s)], env else [], env in
+        env, save_live @ push_a @ [Call f; Binop ("+", L (n * word_size), esp)] @ ret @ load_live
+
+      | BEGIN (f, a, l) ->  let env = env#enter f a l in
+        env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ (env#lsize)), esp);]
+
+        (* создать метку; создать переменные; заполнить переменные из стека; пролог*)
+      | END             ->  env, [Label (env#epilogue); Mov (ebp, esp); Pop ebp; Ret;
+                                  Meta (Printf.sprintf "\t.set\t%s,\t%d" env#lsize (env#allocated * word_size))]
+
+      (* метка эпилога; сдлеать эпилог*)
+      | RET b           ->  
+        let env, ret =
+          match b with
+          | false -> env, []
+          | true  -> let s, env = env#pop in env, [Mov (s, eax)] 
+        in
+        env, ret @ [Jmp (env#epilogue)] (* положить или нет значение на стек; перейти на эпилог *)
+    in
+    let env, xcode' = compile env code' in
+    env, xcode @ xcode'
 
 (* A set of strings *)           
 module S = Set.Make (String)
@@ -264,7 +215,7 @@ module S = Set.Make (String)
 module M = Map.Make (String)
 
 (* Environment implementation *)
-let make_assoc l = List.combine l (List.init (List.length l) (fun x -> x))
+let make_assoc l = List.combine l (list_init (List.length l) (fun x -> x))
                      
 class env =
   object (self)

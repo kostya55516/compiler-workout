@@ -165,6 +165,7 @@ module Expr =
        which takes an environment (of the same type), a name of the function, a list of actual parameters and a configuration, 
        an returns a pair: the return value for the call and the resulting configuration
     *)                                                       
+
     let to_func op =
       let bti   = function true -> 1 | _ -> 0 in
       let itb b = b <> 0 in
@@ -184,27 +185,111 @@ module Expr =
       | "&&" -> fun x y -> bti (itb x && itb y)
       | "!!" -> fun x y -> bti (itb x || itb y)
       | _    -> failwith (Printf.sprintf "Unknown binary operator %s" op)    
+
+    let rec eval env ((st, i, o, r) as conf) expr =
+      let eval_exps env conf exps = 
+        let eval_list exp (ags, c) = let a, c = eval env c exp in (a::ags, c) in           
+        let args, conf             = List.fold_right eval_list exps ([], conf) in
+        args, conf
+      in      
+      match expr with
+      | Const n   -> let r = Value.Int n in r, (st, i, o, Some r)
+      | Array ar  -> 
+        let ar, (st, i, o, _) = eval_exps env conf ar in
+        let r = Value.Array (Array.of_list ar) in
+        r, (st, i, o, Some r)
+      | String s  -> let r = Value.String s in r, (st, i, o, Some r)
+      | Var   x   -> let r = State.eval st x in r, (st, i, o, Some r)
+      | Binop (op, x, y) -> 
+        let a, conf = eval env conf x in
+        let b, conf = eval env conf y in
+        let r       = Value.Int (to_func op (Value.to_int a) (Value.to_int b)) in
+        r, (st, i, o, Some r)
+      | Call (name, exps) ->
+        let args, conf             = eval_exps env conf exps in
+        let st', i, o, Some r      = env#definition env name args conf in
+        r, (State.leave st' st, i, o, Some r)
+      | Sexp (t, v) -> 
+        let vs, (st, i, o, _) = eval_exps env conf v in
+        let r = Value.Sexp (t, vs) in
+        r, (st, i, o, Some r) 
     
-    let rec eval env ((st, i, o, r) as conf) expr = failwith "Not implemented"
-    and eval_list env conf xs =
-      let vs, (st, i, o, _) =
-        List.fold_left
-          (fun (acc, conf) x ->
-            let (_, _, _, Some v) as conf = eval env conf x in
-            v::acc, conf
-          )
-          ([], conf)
-          xs
-      in
-      (st, i, o, List.rev vs)
-         
+    let eval_exps env conf exps = 
+      let eval_list exp (ags, c) = let a, c = eval env c exp in (a::ags, c) in           
+      let args, conf             = List.fold_right eval_list exps ([], conf) in
+      args, conf
+
     (* Expression parser. You can use the following terminals:
 
          IDENT   --- a non-empty identifier a-zA-Z[a-zA-Z0-9_]* as a string
          DECIMAL --- a decimal constant [0-9]+ as a string                                                                                                                  
     *)
-    ostap (                                      
-      parse: empty {failwith "Not implemented"}
+    let binop op x y = Binop (op, x, y)
+
+    ostap (
+      expr:
+        !(Util.expr
+           (fun x -> x)
+           [|
+             `Lefta , [ostap ("!!"), (binop "!!")];
+             `Lefta , [ostap ("&&"), (binop "&&")];
+             `Nona  , [ostap ("<="), (binop "<=");
+                       ostap (">="), (binop ">=");
+                       ostap ("<"), (binop "<");
+                       ostap (">"), (binop ">")];
+             `Nona  , [ostap ("=="), (binop "==");
+                       ostap ("!="), (binop "!=")];
+             `Lefta , [ostap ("+"), (binop "+");
+                       ostap ("-"), (binop "-")];
+             `Lefta , [ostap ("*"), (binop "*");
+                       ostap ("/"), (binop "/");
+                       ostap ("%"), (binop "%")]
+           |]
+           primary
+         );
+      
+      func: fname:IDENT "(" a:args ")" { Call (fname, a) };
+
+      args:
+        e:expr "," a:args   { e::a }
+      | e:expr              { [e] }
+      | empty { [] }
+      ;
+
+      builtins:
+       x:primary_type ".length"  { Call (".length", [x]) }
+      | x:array_elem ".length"    { Call (".length", [x]) }
+      | a:array_elem              { a }
+      ;
+      (* Call (".elem", [x; e])  *)
+
+      array_elem: x:primary_type br:brackets { 
+           List.fold_left (fun v e -> Call (".elem", [v; e])) x br
+      };
+
+      brackets:
+        "[" e:expr "]" b:brackets { e::b }
+      | "[" e:expr "]" { [e] }
+      ;
+      
+      primary_type:
+        x:IDENT             { Var x }
+      | n:DECIMAL           { Const n }  
+      | "\"" s:IDENT "\""   { String s }
+      | c:CHAR              { Const (Char.code c) }
+      | "[" a:args "]"      { Call (".array", a) }
+      ;
+
+      sexp: "`" t:IDENT v:sexp_values { Sexp (t, v) };
+
+      sexp_values:
+       "(" a:args ")" { a }
+      | empty         { [] }
+      ;
+
+      primary: builtins | func | primary_type | sexp | -"(" expr -")";
+
+      parse: expr
     )
     
   end
@@ -226,9 +311,39 @@ module Stmt =
 
         (* Pattern parser *)                                 
         ostap (
-          parse: empty {failwith "Not implemented"}
+          args:
+            "(" ps:patterns ")" { ps }
+          | empty               { [] }
+          ;
+
+          patterns:
+            p:parse "," ps:patterns { p::ps }
+          | p:parse { [p] }
+          | empty               { [] }
+          ;
+
+          parse: 
+            "_"                 { Wildcard }
+          | "`" t:IDENT v:args  { Sexp (t, v) }
+          | x:IDENT             { Ident x }
         )
         
+        let rec p_match v = function
+        | Sexp (g, ps) ->
+          let Value.Sexp (t, vs) = v in 
+          String.compare t g == 0 && List.compare_lengths vs ps == 0 && List.for_all2 (fun v p -> p_match v p) vs ps
+        | _ -> true
+
+        let bindings a p =
+        let rec r_bindings s a = function
+        | Wildcard -> s
+        | Ident x  -> State.bind x a s
+        | Sexp (_, ps) ->
+          let Value.Sexp (_, vs) = a in
+          List.fold_left2 (fun s p v -> r_bindings s v p) s ps vs 
+        in
+        r_bindings (fun k -> print_string (Printf.sprintf "no such variable %s" k); Value.Int 0) a p
+
         let vars p =
           transform(t) (object inherit [string list] @t[foldl] method c_Ident s _ name = name::s end) [] p
         
@@ -266,13 +381,95 @@ module Stmt =
       in
       State.update x (match is with [] -> v | _ -> update (State.eval st x) v is) st
 
-    let rec eval env ((st, i, o, r) as conf) k stmt = failwith "Not implemented"
-                                                        
+    let rec eval env ((st, i, o, r) as conf) k stmt =
+      let (<>) s1 s2 = if s2 == Skip then s1 else Seq (s1, s2) in
+      match stmt with
+      | Skip -> if k == Skip then conf else eval env conf Skip k
+      | Assign (s, inds, exp) ->           
+        let inds, conf           = Expr.eval_exps env conf inds in
+        let n, (st, i, o, r)     = Expr.eval env conf exp in
+        let st = update st s n inds in
+        eval env (st, i, o, r) Skip k
+      | Seq (s1, s2) -> eval env conf (s2 <> k) s1    
+      | If (exp, s1, s2) ->
+        let n, conf = Expr.eval env conf exp in
+        let s       = if Value.to_int n != 0 then s1 else s2 in
+        eval env conf k s
+      | While (exp, s) -> 
+        let n, conf = Expr.eval env conf exp in
+        let k, s    = if Value.to_int n != 0 then While (exp, s) <> k, s else Skip, k in 
+        eval env conf k s
+      | Repeat (s, exp) -> 
+        let exp = Expr.Binop ("==", exp, Const 0) in
+        eval env conf (While (exp, s) <> k) s
+      | Call (name, exps) ->
+        let args, conf  = Expr.eval_exps env conf exps in
+        let conf        = env#definition env name args conf in
+        eval env conf Skip k
+      | Return r ->
+        (match r with
+        | None   -> conf
+        | Some e -> snd (Expr.eval env conf e)
+        )
+      | Case (e, pms) -> 
+        let v, conf = Expr.eval env conf e in
+        let rec pat_list ((st, i, o, r) as conf) = function
+        | [] -> 
+        (* eval env conf Skip k *)
+         failwith (Printf.sprintf "Bad pattern match, len: %d" (List.length pms))
+        | (p, t)::pms -> 
+          if Pattern.p_match v p 
+          then eval env ((State.push st (Pattern.bindings v p) (Pattern.vars p)), i, o, r) k (Seq (t, Leave))
+          else pat_list conf pms
+        in
+        pat_list conf pms
+      | Leave         -> eval env (State.drop st, i, o, r) Skip k
+         
+
     (* Statement parser *)
     ostap (
-      parse: empty {failwith "Not implemented"}
-    )
+      expr: !(Expr.expr);
+
+      stmt:
+        x:IDENT ":=" e:expr         { Assign (x, [], e) }
+      | x:IDENT is:inds ":=" e:expr { Assign (x, is, e) } 
+      | "skip"                      { Skip }
+      | "if" e:expr "then" s1:parse "elif" s2:elif "fi"           { If (e, s1, s2) }
+      | "if" e:expr "then" s1:parse "else" s2:parse "fi"          { If (e, s1, s2) }
+      | "if" e:expr "then" s1:parse "fi"                          { If (e, s1, Skip) }
+      | "while" e:expr "do" s:parse "od"                          { While (e, s) }
+      | "for"   s1:stmt "," e:expr "," s2:stmt "do" s:parse "od"  { Seq (s1, While(e, Seq(s, s2))) }
+      | "repeat" s:parse "until" e:expr                           { Repeat (s, e) }
+      | fname:IDENT "(" a:!(Expr.args) ")"                        { Call (fname, a) }
+      | "return" e:expr                                           { Return (Some e) }
+      | "return"                                                  { Return None }
+      | "case" e:expr "of" p:pattern_matches "esac"               { Case (e, p) }
+      ;
+
+      pattern_matches:
+        p:pattern_match ps:pattern_matches_tail { p::ps }
+      ;
       
+      pattern_matches_tail: 
+        "|" p:pattern_match ps:pattern_matches_tail { p::ps }
+      | empty                                       { [] }
+      ;
+
+      pattern_match: p:!(Pattern.parse) "->" s:parse { p, s };
+
+      inds:
+       "[" i:expr "]" is:inds { i::is }
+      | empty                 { [] }
+      ;
+ 
+      elif:
+        e:expr "then" s1:parse "elif" s2:elif             { If (e, s1, s2) }
+      | e:expr "then" s1:parse "else" s2:parse            { If (e, s1, s2) }
+      | e:expr "then" s1:parse                            { If (e, s1, Skip) }
+      ;
+
+      parse: <x::xs> :!(Util.listBy)[ostap (";")][stmt] { List.fold_left (fun x y -> Seq (x, y)) x xs }
+    )
   end
 
 (* Function and procedure definitions *)
