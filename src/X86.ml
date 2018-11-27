@@ -105,7 +105,30 @@ let suffix op = match op with
     | "!=" -> "ne"
 
 let rec compile env code =
-  let onstack = function | S _ -> true | _ -> false in
+  let onstack = function | S _ -> true | _ -> false in 
+  let call env f n b =
+    let f = match f.[0] with '.' -> "B" ^ String.sub f 1 (String.length f - 1) | _ -> f in
+    let live        = env#live_registers 1 in
+    let save_live   = List.fold_right (fun a xs -> (Push a)::xs) live [] in
+    let load_live   = List.fold_left (fun xs a -> (Pop a)::xs) [] live in
+    let rec gen n f e =
+      match n with
+      | 0 -> [], e  
+      | _ ->  let x, e  = f e in
+              let xs, e = gen (n - 1) f e in
+              (Push x)::xs, e
+    in
+    let push_a, env = gen n (fun env -> env#pop) env in
+    let push_a      =
+      match f with
+      | "Barray" -> push_a @ [Push (L n)]
+      | "Bsta"   -> let x::v::is = push_a in is @ [x; v; Push (L (n-2))]
+      | _  -> push_a
+    in
+    let ret, env    = if b then let s, env = env#allocate in [Mov (eax, s)], env else [], env in
+    let call_code = if n = 0 then [Call f] else [Call f; Binop ("+", L (n * word_size), esp)] in
+    env, save_live @ push_a @ call_code @ load_live @ ret
+  in
   match code with
   | [] -> env, []
   | inst :: code' ->
@@ -118,9 +141,23 @@ let rec compile env code =
                          )
       | ST x    -> let s, env = (env#global x)#pop in
                     env, [Mov (s, env#loc x)]
+      | STA (x, n) ->
+             let s, env = (env#global x)#allocate in
+             let push =
+               match s with
+               | S _ | M _ -> [Mov (env#loc x, eax); Mov (eax, s)]
+               | _         -> [Mov (env#loc x, s)]
+             in
+             let env, code = call env ".sta" (n+2) false in
+             env, push @ code
       | CONST z -> let s, env = env#allocate in
                     env, [Mov (L z, s)]
-
+      | STRING s ->
+             let s, env = env#string s in
+             let l, env = env#allocate in
+             let env, call = call env ".string" 1 true in
+             (env, Mov (M ("$" ^ s), l) :: call)
+       
       | LABEL l     -> env, [Label l]
       | JMP l       -> env, [Jmp l]
       | CJMP (t, l) -> let s, env = env#pop in
@@ -174,21 +211,7 @@ let rec compile env code =
             Mov   (edx, y)
           ]
         )
-      | CALL (f, n, b)  ->  
-        let rec gen n f e =
-          match n with
-          | 0 -> [], e  
-          | _ ->  let x, e  = f e in
-                  let xs, e = gen (n - 1) f e in
-                  (Push x)::xs, e
-        in
-        let push_a, env = gen n (fun env -> env#pop) env in
-        let live        = env#live_registers 1 in
-        let save_live   = List.fold_right (fun a xs -> (Push a)::xs) live [] in
-        let load_live   = List.fold_left (fun xs a -> (Pop a)::xs) [] live in
-        let ret, env    = if b then let s, env = env#allocate in [Mov (eax, s)], env else [], env in
-        env, save_live @ push_a @ [Call f; Binop ("+", L (n * word_size), esp)] @ ret @ load_live
-
+      | CALL (f, n, b)  ->  call env f n b
       | BEGIN (f, a, l) ->  let env = env#enter f a l in
         env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ (env#lsize)), esp);]
 

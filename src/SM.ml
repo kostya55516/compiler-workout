@@ -156,7 +156,7 @@ let fresh_label : string IState.t =
   put (i + 1) >>= fun () ->
   return (Printf.sprintf "L%d" i)
 
-let fun_label = Printf.sprintf "L%s"
+let fun_label f = match f.[0] with '.' -> f | _ ->  Printf.sprintf "L%s" f
 
 
 let compile (d, p) =
